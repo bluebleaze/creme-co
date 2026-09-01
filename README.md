@@ -1,20 +1,51 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# IOnLearn — Smart Study Companion
 
-# Run and deploy your AI Studio app
+Auto-sync Google Classroom → to-do list + AI resources + chatbot.
 
-This contains everything you need to run your app locally.
+## Setup
 
-View your app in AI Studio: https://ai.studio/apps/2d1ff437-1205-456a-96cf-a0ff02164a32
+1. **Firebase**: Create a project at [console.firebase.google.com](https://console.firebase.google.com)
+   - Enable **Authentication** → Google sign-in provider
+   - Enable **Cloud Firestore** (start in test mode)
+   - Copy your web app config
 
-## Run Locally
+2. **Google Cloud**: In your Firebase project's [Google Cloud Console](https://console.cloud.google.com)
+   - Enable **Google Classroom API**
+   - Add your domain to OAuth consent screen authorized domains
 
-**Prerequisites:**  Node.js
+3. **Gemini AI**: Get an API key at [aistudio.google.com](https://aistudio.google.com/apikey)
 
+4. **Environment**: Copy `.env.local.example` to `.env.local` and fill in the values:
+   ```bash
+   cp .env.local.example .env.local
+   ```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+5. **Run**:
+   ```bash
+   npm install
+   npm run dev
+   ```
+
+## How It Works
+
+1. Sign in with Google (grants Classroom read access)
+2. Click "Sync Classroom" to pull assignments
+3. Tasks appear as a to-do list — click any task to see AI-generated study resources
+4. Use the 💬 chatbot (bottom-right) for follow-up questions about your tasks
+
+## Tech Stack
+
+Next.js 14 · TypeScript · Tailwind CSS · Firebase Auth + Firestore · Gemini AI
+
+## Firestore Rules (production)
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
