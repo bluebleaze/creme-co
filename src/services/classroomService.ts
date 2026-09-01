@@ -1,0 +1,438 @@
+import { ClassroomCourse, ClassroomCourseWork, ClassroomMaterial, TodoTask } from '../types';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const provider = new GoogleAuthProvider();
+provider.addScope('https://www.googleapis.com/auth/classroom.courses.readonly');
+provider.addScope('https://www.googleapis.com/auth/classroom.coursework.me.readonly');
+provider.addScope('https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly');
+provider.addScope('https://www.googleapis.com/auth/classroom.student-submissions.me.readonly');
+provider.addScope('https://www.googleapis.com/auth/drive.readonly');
+provider.addScope('https://www.googleapis.com/auth/userinfo.profile');
+provider.addScope('https://www.googleapis.com/auth/userinfo.email');
+
+const TOKEN_KEY = 'classroom_access_token';
+const TOKEN_EXPIRY_KEY = 'classroom_token_expiry';
+const USER_PROFILE_KEY = 'classroom_user_profile';
+
+function safeGetItem(key: string): string | null {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem(key);
+  }
+  return null;
+}
+
+function safeSetItem(key: string, value: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(key, value);
+  }
+}
+
+function safeRemoveItem(key: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(key);
+  }
+}
+
+export interface UserProfile {
+  name: string;
+  email: string;
+  picture?: string;
+}
+
+export class ClassroomService {
+  private static isAuthenticating = false;
+
+  // Initialize GSI Token Client - Deprecated as we are using Firebase Auth now
+  public static initGsiClient(clientId: string, onTokenReceived: (token: string) => void): void {
+    // Keep this signature to avoid breaking page.tsx immediately, but we will use requestToken instead
+    console.log('Firebase Auth initialized.');
+  }
+
+  // Request Access Token popup via Firebase
+  public static async requestToken(): Promise<{ token: string; profile: UserProfile } | null> {
+    if (this.isAuthenticating) {
+      throw new Error('Proses autentikasi sedang berjalan. Silakan selesaikan popup atau tunggu beberapa saat.');
+    }
+    
+    this.isAuthenticating = true;
+    try {
+      const result = await signInWithPopup(auth, provider);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (credential && credential.accessToken) {
+        const profile: UserProfile = {
+          name: result.user.displayName || result.user.email || '',
+          email: result.user.email || '',
+          picture: result.user.photoURL || undefined,
+        };
+        safeSetItem(USER_PROFILE_KEY, JSON.stringify(profile));
+        
+        // Caching for session (as per previous flow for compatibility, though memory is better)
+        safeSetItem(TOKEN_KEY, credential.accessToken);
+        safeSetItem(TOKEN_EXPIRY_KEY, (Date.now() + 3600 * 1000).toString());
+        return { token: credential.accessToken, profile };
+      }
+    } catch (e: any) {
+      console.error('Firebase Auth Error:', e);
+      if (e.code === 'auth/popup-blocked') {
+        throw new Error('Sistem login diblokir oleh browser (misalnya pemblokir iklan, mode penyamaran, atau lingkungan pratinjau). Silakan izinkan popup, matikan pemblokir iklan, atau buka aplikasi ini di tab baru. Anda juga dapat menggunakan Mode Simulasi.');
+      } else if (e.code === 'auth/cancelled-popup-request' || e.code === 'auth/popup-closed-by-user') {
+        throw new Error('Login dibatalkan oleh pengguna.');
+      }
+      throw e;
+    } finally {
+      this.isAuthenticating = false;
+    }
+    return null;
+  }
+
+  // Check if current stored token is valid
+  public static getStoredToken(): string | null {
+    const token = safeGetItem(TOKEN_KEY);
+    const expiry = safeGetItem(TOKEN_EXPIRY_KEY);
+
+    if (!token || !expiry) return null;
+
+    if (Date.now() > parseInt(expiry, 10)) {
+      this.logout();
+      return null;
+    }
+
+    return token;
+  }
+
+  public static getUserProfile(): UserProfile | null {
+    const saved = safeGetItem(USER_PROFILE_KEY);
+    return saved ? JSON.parse(saved) : null;
+  }
+
+  public static async fetchUserProfile(token: string): Promise<UserProfile | null> {
+    return this.getUserProfile();
+  }
+
+  public static async logout(): Promise<void> {
+    try {
+      await signOut(auth);
+    } catch (e) {
+      console.error('Signout error', e);
+    }
+    safeRemoveItem(TOKEN_KEY);
+    safeRemoveItem(TOKEN_EXPIRY_KEY);
+    safeRemoveItem(USER_PROFILE_KEY);
+  }
+
+  // Fetch all active courses for the student
+  public static async fetchCourses(token: string): Promise<ClassroomCourse[]> {
+    const response = await fetch('https://classroom.googleapis.com/v1/courses?courseStates=ACTIVE', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google Classroom API error (${response.status}): ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.courses || [];
+  }
+
+  // Fetch coursework assignments for a course
+  public static async fetchCourseWork(token: string, courseId: string): Promise<ClassroomCourseWork[]> {
+    const response = await fetch(
+      `https://classroom.googleapis.com/v1/courses/${courseId}/courseWork?courseWorkStates=PUBLISHED`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 403) {
+        return [];
+      }
+      throw new Error(`Failed to fetch coursework for course ${courseId}`);
+    }
+
+    const data = await response.json();
+    return data.courseWork || [];
+  }
+
+  // Fetch student submission status for a course
+  public static async fetchSubmissions(token: string, courseId: string): Promise<Record<string, string>> {
+    try {
+      const response = await fetch(
+        `https://classroom.googleapis.com/v1/courses/${courseId}/courseWork/-/studentSubmissions?states=TURNED_IN,RETURNED`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      if (!response.ok) return {};
+      const data = await response.json();
+      const map: Record<string, string> = {};
+      if (Array.isArray(data.studentSubmissions)) {
+        for (const sub of data.studentSubmissions) {
+          map[sub.courseWorkId] = sub.state;
+        }
+      }
+      return map;
+    } catch {
+      return {};
+    }
+  }
+
+  // Helper to format due date & time into readable Indonesian format
+  public static formatDueDateTime(dueDate?: { year: number; month: number; day: number }, dueTime?: { hours?: number; minutes?: number }): { formattedStr: string; timestamp: number | null } {
+    if (!dueDate || !dueDate.year || !dueDate.month || !dueDate.day) {
+      return { formattedStr: 'Tidak ada tenggat waktu', timestamp: null };
+    }
+
+    const year = dueDate.year;
+    const month = dueDate.month - 1;
+    const day = dueDate.day;
+    const hours = dueTime?.hours ?? 23;
+    const minutes = dueTime?.minutes ?? 59;
+
+    const dateObj = new Date(year, month, day, hours, minutes);
+    const timestamp = dateObj.getTime();
+
+    const now = new Date();
+    const isToday = now.toDateString() === dateObj.toDateString();
+
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const isTomorrow = tomorrow.toDateString() === dateObj.toDateString();
+
+    const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')} WIB`;
+
+    if (isToday) {
+      return { formattedStr: `Hari ini, ${timeStr}`, timestamp };
+    }
+    if (isTomorrow) {
+      return { formattedStr: `Besok, ${timeStr}`, timestamp };
+    }
+
+    const monthsIndo = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun',
+      'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des',
+    ];
+
+    return {
+      formattedStr: `${day} ${monthsIndo[month]} ${year}, ${timeStr}`,
+      timestamp,
+    };
+  }
+
+  // Synchronize Google Classroom with Local Todo List
+  public static async syncAllClassrooms(token: string, existingTasks: TodoTask[]): Promise<{ updatedTasks: TodoTask[]; newCount: number }> {
+    const courses = await this.fetchCourses(token);
+    const updatedTasks = [...existingTasks];
+    let newCount = 0;
+
+    for (const course of courses) {
+      const [courseWorks, submissionsMap] = await Promise.all([
+        this.fetchCourseWork(token, course.id),
+        this.fetchSubmissions(token, course.id),
+      ]);
+
+      for (const cw of courseWorks) {
+        const existingIndex = updatedTasks.findIndex(t => t.courseWorkId === cw.id || (t.title === cw.title && t.courseName === course.name));
+        const { formattedStr, timestamp } = this.formatDueDateTime(cw.dueDate, cw.dueTime);
+        const isTurnedIn = submissionsMap[cw.id] === 'TURNED_IN' || submissionsMap[cw.id] === 'RETURNED';
+
+        // Calculate priority based on due date proximity
+        let priority: 'low' | 'medium' | 'high' = 'medium';
+        if (timestamp) {
+          const diffHours = (timestamp - Date.now()) / (1000 * 60 * 60);
+          if (diffHours < 48 && diffHours > 0) priority = 'high';
+          else if (diffHours < 0) priority = 'high';
+          else if (diffHours > 168) priority = 'low';
+        }
+
+        if (existingIndex >= 0) {
+          // Update details while preserving user's aiAnalysis and completed check
+          const existing = updatedTasks[existingIndex];
+          updatedTasks[existingIndex] = {
+            ...existing,
+            title: cw.title,
+            description: cw.description || existing.description,
+            dueDateStr: formattedStr,
+            dueTimestamp: timestamp,
+            points: cw.maxPoints,
+            materials: cw.materials || existing.materials,
+            classroomLink: cw.alternateLink || existing.classroomLink,
+            isCompleted: isTurnedIn || existing.isCompleted,
+            updatedAt: new Date().toISOString(),
+          };
+        } else {
+          // New task found from Google Classroom!
+          newCount++;
+          const newTask: TodoTask = {
+            id: `task_gc_${cw.id}`,
+            courseWorkId: cw.id,
+            courseId: course.id,
+            courseName: course.name,
+            title: cw.title,
+            description: cw.description || '',
+            dueDateStr: formattedStr,
+            dueTimestamp: timestamp,
+            points: cw.maxPoints,
+            isCompleted: isTurnedIn,
+            priority,
+            syncSource: 'classroom',
+            classroomLink: cw.alternateLink,
+            materials: cw.materials,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          updatedTasks.unshift(newTask);
+        }
+      }
+    }
+
+    return { updatedTasks, newCount };
+  }
+
+  // Realistic starter seed tasks for instant testing and showcase
+  public static getInitialSeedTasks(): TodoTask[] {
+    return [
+      {
+        id: 'seed-1',
+        courseId: 'c-webdev',
+        courseName: 'Pemrograman Web Lanjut (TI-3A)',
+        title: 'Tugas 4: Implementasi Autentikasi JWT & Role-Based Access Control',
+        description: 'Buatlah RESTful API sederhana dengan Node.js/Express yang mengimplementasikan sistem login, register, hashing password dengan bcrypt, dan middleware proteksi rute menggunakan JSON Web Token (JWT). Sertakan pengujian endpoint menggunakan Postman.',
+        dueDateStr: 'Besok, 23:59 WIB',
+        dueTimestamp: Date.now() + 28 * 3600 * 1000,
+        points: 100,
+        priority: 'high',
+        isCompleted: false,
+        syncSource: 'classroom',
+        classroomLink: 'https://classroom.google.com',
+        createdAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+        aiAnalysis: {
+          summary: 'Membangun API autentikasi aman dengan Node.js, Express, enkripsi kata sandi Bcrypt, dan verifikasi token JWT beserta pengujian rute.',
+          difficulty: 'Sedang',
+          estimatedMinutes: 90,
+          keyConcepts: [
+            'JSON Web Token (JWT) Header, Payload & Signature',
+            'Password Hashing dengan Bcrypt Salt Rounds',
+            'Express Middleware & Authorization Bearer Header',
+            'Postman Environment & Auth Header Testing',
+          ],
+          checklist: [
+            { id: 'c1', text: 'Inisialisasi project Node.js dan install express, jsonwebtoken, bcrypt, dotenv', done: true },
+            { id: 'c2', text: 'Buat endpoint POST /api/register dengan validasi input dan hashing bcrypt', done: false },
+            { id: 'c3', text: 'Buat endpoint POST /api/login yang memverifikasi kredensial dan men-generate JWT', done: false },
+            { id: 'c4', text: 'Buat middleware verifyToken untuk memeriksa Bearer Token di header Authorization', done: false },
+            { id: 'c5', text: 'Uji endpoint terproteksi di Postman dan buat dokumentasi ekspor collection', done: false },
+          ],
+          sources: [
+            {
+              title: 'JSON Web Token Official Introduction',
+              domain: 'jwt.io',
+              url: 'https://jwt.io/introduction',
+              description: 'Dokumentasi standar resmi mengenai struktur JWT, algoritma hashing, dan best practice keamanan.',
+              type: 'doc',
+            },
+            {
+              title: 'Tutorial Node.js JWT Authentication',
+              domain: 'digitalocean.com',
+              url: 'https://www.digitalocean.com/community/tutorials/nodejs-jwt-expressjs',
+              description: 'Panduan langkah demi langkah implementasi token refresh dan middleware auth di Express.',
+              type: 'tutorial',
+            },
+            {
+              title: 'Best Practices for Passwords Hashing & Storage (OWASP)',
+              domain: 'owasp.org',
+              url: 'https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html',
+              description: 'Standar keamanan industri untuk penyimpanan password menggunakan algoritma salt bcrypt/argon2.',
+              type: 'academic',
+            },
+          ],
+          youtubeVideos: [
+            {
+              title: 'JWT Authentication Tutorial with Node.js & Express (Web Dev Simplified)',
+              channel: 'Web Dev Simplified',
+              searchQuery: 'Web Dev Simplified JWT Authentication Node.js',
+              searchUrl: 'https://www.youtube.com/results?search_query=Web+Dev+Simplified+JWT+Authentication+Node.js',
+              reason: 'Penjelasan konsep token vs session yang sangat visual, to the point, dan mudah dipahami dalam 15 menit.',
+              keyTakeaways: ['Perbedaan Access Token & Refresh Token', 'Cara mengekstrak header auth', 'Menangani error token expired'],
+            },
+            {
+              title: 'Implementasi JWT dan Bcrypt di Express JS (Bahasa Indonesia)',
+              channel: 'Programmer Zaman Now',
+              searchQuery: 'Programmer Zaman Now JWT Express JS',
+              searchUrl: 'https://www.youtube.com/results?search_query=Programmer+Zaman+Now+JWT+Express+JS',
+              reason: 'Penjelasan dalam bahasa Indonesia yang sangat runtut dari struktur folder hingga praktek keamanan kode.',
+              keyTakeaways: ['Struktur controller auth', 'Handling error respon HTTP 401 & 403', 'Tips konfigurasi .env'],
+            },
+          ],
+          studyTips: [
+            'Jangan pernah menyimpan data sensitif seperti password mentah di dalam payload JWT karena payload hanya di-encode base64, bukan dienkripsi rahasia.',
+            'Simpan JWT Secret Key di environment variable (.env) dan jangan commit ke GitHub publik.',
+            'Gunakan HTTP status code yang tepat: 401 Unauthorized bila token tidak ada/invalid, dan 403 Forbidden bila hak akses tidak sesuai.',
+          ],
+          recommendedStrategy: 'Kerjakan mulai dari controller register -> login -> pembuatan helper token -> middleware proteksi rute. Uji setiap tahap di Postman sebelum melangkah ke tahap berikutnya.',
+          generatedAt: new Date().toISOString(),
+        },
+      },
+      {
+        id: 'seed-2',
+        courseId: 'c-math',
+        courseName: 'Matematika Diskrit & Logika',
+        title: 'Latihan Mandiri: Graf Bipartit & Algoritma Dijkstra Lintasan Terpendek',
+        description: 'Kerjakan soal studi kasus nomor 3 sampai 7 pada modul Bab 6. Tentukan lintasan terpendek dari simpul A ke simpul Z menggunakan tabel iterasi algoritma Dijkstra lengkap dengan langkah manual.',
+        dueDateStr: '3 Hari Lagi, 17:00 WIB',
+        dueTimestamp: Date.now() + 72 * 3600 * 1000,
+        points: 85,
+        priority: 'medium',
+        isCompleted: false,
+        syncSource: 'classroom',
+        classroomLink: 'https://classroom.google.com',
+        createdAt: new Date(Date.now() - 12 * 3600 * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: 'seed-3',
+        courseId: 'c-ai',
+        courseName: 'Kecerdasan Buatan & Machine Learning',
+        title: 'Proyek Kelompok: Analisis Sentimen Ulasan Film dengan Naive Bayes & TF-IDF',
+        description: 'Lakukan pra-pemrosesan teks (case folding, tokenizing, stopword removal, stemming) pada dataset ulasan film, lalu latih model klasifikasi Naive Bayes. Tampilkan matriks kebingungan (Confusion Matrix), Accuracy, Precision, dan F1-Score.',
+        dueDateStr: '6 Sep 2026, 23:59 WIB',
+        dueTimestamp: Date.now() + 140 * 3600 * 1000,
+        points: 100,
+        priority: 'medium',
+        isCompleted: false,
+        syncSource: 'classroom',
+        classroomLink: 'https://classroom.google.com',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: 'seed-4',
+        courseId: 'c-db',
+        courseName: 'Basis Data & Cloud Database',
+        title: 'Tugas 2: Normalisasi Basis Data hingga 3NF (Third Normal Form)',
+        description: 'Ubah form struk transaksi faktur penjualan retail yang belum ternormalisasi (0NF) menjadi tabel-tabel terpisah yang memenuhi kaidah 1NF, 2NF, dan 3NF. Lengkapi dengan Entity Relationship Diagram (ERD).',
+        dueDateStr: 'Kemarin, 23:59 WIB',
+        dueTimestamp: Date.now() - 18 * 3600 * 1000,
+        points: 100,
+        priority: 'high',
+        isCompleted: true,
+        completedAt: new Date().toISOString(),
+        syncSource: 'classroom',
+        classroomLink: 'https://classroom.google.com',
+        createdAt: new Date(Date.now() - 48 * 3600 * 1000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+  }
+}
