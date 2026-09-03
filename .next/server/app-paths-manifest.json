@@ -1,4 +1,0 @@
-{
-  "/api/ai/analyze-task/route": "app/api/ai/analyze-task/route.js",
-  "/page": "app/page.js"
-}
