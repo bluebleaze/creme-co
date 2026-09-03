@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   Plus, 
   Sparkles, 
@@ -206,13 +206,18 @@ export default function App() {
     }
   }, [tasks, selectedTask, userPreferences]);
 
-  // Auto-analyze pending tasks that do not have AI Analysis yet
+  const prevTasksCount = useRef(0);
+
+  // Auto-analyze HANYA jika ada tepat 1 tugas baru yang ditambahkan (bukan bulk sync)
   useEffect(() => {
-    const unanalyzedTasks = tasks.filter(t => !t.isCompleted && !t.aiAnalysis && !t.aiLoading && !t.aiError);
-    if (unanalyzedTasks.length > 0) {
-      // Analyze the first one found to prevent spamming the API simultaneously
-      const taskToAnalyze = unanalyzedTasks[0];
-      handleAnalyzeTask(taskToAnalyze.id);
+    const diff = tasks.length - prevTasksCount.current;
+    prevTasksCount.current = tasks.length;
+
+    if (diff === 1) {
+      const newestTask = [...tasks].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      if (newestTask && !newestTask.isCompleted && !newestTask.aiAnalysis && !newestTask.aiLoading && !newestTask.aiError) {
+        handleAnalyzeTask(newestTask.id);
+      }
     }
   }, [tasks, handleAnalyzeTask]);
 
