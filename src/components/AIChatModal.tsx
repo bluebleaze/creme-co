@@ -426,6 +426,31 @@ export const AIChatModal: React.FC<AIChatModalProps> = ({
         {/* Input Bar */}
         <div className="p-4 border-t border-slate-200 bg-white">
           <div className="flex items-end gap-2 bg-slate-50 border border-slate-200 rounded-2xl p-2 focus-within:ring-2 focus-within:ring-indigo-500/20 focus-within:border-indigo-500 transition">
+            <div className="flex flex-col gap-1 shrink-0 px-1">
+              <input
+                type="file"
+                id="chat-file-upload"
+                className="hidden"
+                accept=".txt,.md,.csv,.json"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = (event) => {
+                    const text = event.target?.result as string;
+                    setInputPrompt(prev => prev + `\n\n[Isi Dokumen ${file.name}]:\n${text}`);
+                  };
+                  reader.readAsText(file);
+                }}
+              />
+              <button
+                onClick={() => document.getElementById('chat-file-upload')?.click()}
+                className="p-1.5 text-slate-400 hover:text-indigo-600 transition"
+                title="Sisipkan file teks/dokumen (.txt, .md, .csv)"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+              </button>
+            </div>
             <textarea
               id="ai-chat-input-field"
               ref={inputRef}
